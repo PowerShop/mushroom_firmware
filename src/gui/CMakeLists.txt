@@ -1,0 +1,19 @@
+SET(SOURCES screens/ui_Index.c
+    screens/ui_loading_page.c
+    ui.c
+    components/ui_comp_hook.c
+    ui_helpers.c
+    ui_events.c
+    images/ui_img_1344368723.c
+    images/ui_img_420491115.c
+    images/ui_img_1756937144.c
+    images/ui_img_2021756275.c
+    images/ui_img_2004695613.c
+    images/ui_img_504422231.c
+    images/ui_img_750881228.c
+    images/ui_img_361352527.c
+    images/ui_img_462897253.c
+    fonts/ui_font_Kanit20.c
+    fonts/ui_font_Kanit24.c)
+
+add_library(ui ${SOURCES})
