@@ -6,6 +6,49 @@
 
 static const char* TAG = "AutomationAPI";
 
+// ------------------ Helpers for robust string handling ------------------
+static void toLowercase(char* s) {
+    if (!s) return;
+    for (char* p = s; *p; ++p) {
+        if (*p >= 'A' && *p <= 'Z') *p = *p - 'A' + 'a';
+    }
+}
+
+static void normalizeActionString(const char* src, char* dst, size_t dstSize) {
+    if (!dst || dstSize == 0) return;
+    if (!src || !*src) {
+        strncpy(dst, "turn_on", dstSize - 1);
+        dst[dstSize - 1] = '\0';
+        return;
+    }
+    strncpy(dst, src, dstSize - 1);
+    dst[dstSize - 1] = '\0';
+    toLowercase(dst);
+    for (char* p = dst; *p; ++p) {
+        if (*p == '-' || *p == ' ') *p = '_';
+    }
+    if (strcmp(dst, "on") == 0 || strcmp(dst, "turnon") == 0) {
+        strncpy(dst, "turn_on", dstSize - 1);
+    } else if (strcmp(dst, "off") == 0 || strcmp(dst, "turnoff") == 0) {
+        strncpy(dst, "turn_off", dstSize - 1);
+    }
+    dst[dstSize - 1] = '\0';
+}
+
+static bool isActionTurnOff(const char* action) {
+    if (!action) return false;
+    return (strcmp(action, "turn_off") == 0 || strcmp(action, "off") == 0);
+}
+
+static int sensorTypeToIndex(const char* sensor_type) {
+    if (!sensor_type) return -1;
+    if (strcmp(sensor_type, "temperature") == 0) return 0;
+    if (strcmp(sensor_type, "soil_moisture") == 0) return 1;
+    if (strcmp(sensor_type, "humidity") == 0) return 2;
+    if (strcmp(sensor_type, "light") == 0) return 3;
+    return -1;
+}
+
 // Static member initialization
 AutomationTimer AutomationApiClient::local_timers[12] = {};
 int AutomationApiClient::local_timer_count = 0;
@@ -127,22 +170,19 @@ bool AutomationApiClient::syncFromAPI() {
     for (JsonObject sensor : sensors) {
         if (local_sensor_count >= 16) break;
 
-    AutomationSensor& s = local_sensors[local_sensor_count];
-    // Use API-provided relayId as-is (API/web UI uses 0-based relay IDs)
-    s.relay_id = sensor["relayId"];
+        AutomationSensor& s = local_sensors[local_sensor_count];
+        // Use API-provided relayId as-is (API/web UI uses 0-based relay IDs)
+        s.relay_id = sensor["relayId"];
         strncpy(s.sensor_type, sensor["sensorType"].as<const char*>(), sizeof(s.sensor_type) - 1);
+        s.sensor_type[sizeof(s.sensor_type) - 1] = '\0';
         s.enabled = sensor["enabled"];
         s.min_value = sensor["minValue"];
         s.max_value = sensor["maxValue"];
         strncpy(s.control_mode, sensor["controlMode"].as<const char*>(), sizeof(s.control_mode) - 1);
+        s.control_mode[sizeof(s.control_mode) - 1] = '\0';
         // actionOnTrigger can be 'turn_on' or 'turn_off' (default turn_on)
         const char* actionOnTrigger = sensor["actionOnTrigger"];
-        if (actionOnTrigger) {
-            strncpy(s.action, actionOnTrigger, sizeof(s.action) - 1);
-        } else {
-            strncpy(s.action, "turn_on", sizeof(s.action) - 1);
-        }
-        s.action[sizeof(s.action) - 1] = '\0';
+        normalizeActionString(actionOnTrigger, s.action, sizeof(s.action));
         s.hysteresis = sensor["hysteresis"];
 
         // Log enabled sensors at INFO so it's easy to spot during runtime
@@ -265,52 +305,53 @@ AutomationSensor* AutomationApiClient::getLocalSensor(int relay_id, const char* 
     return nullptr;
 }
 
-bool AutomationApiClient::checkSensorTrigger(int relay_id, const char* sensor_type, 
+bool AutomationApiClient::checkSensorTrigger(int relay_id, const char* sensor_type,
                                              float current_value, bool* should_turn_on) {
     AutomationSensor* sensor = getLocalSensor(relay_id, sensor_type);
     if (!sensor || !sensor->enabled) {
-        *should_turn_on = false;
+        if (should_turn_on) *should_turn_on = false;
         return false;
     }
-    // Maintain last known 'active' flag per-relay for hysteresis smoothing.
-    static bool lastActive[4] = {false, false, false, false};
-    float h = sensor->hysteresis > 0.0f ? sensor->hysteresis : 1.0f;
+    // Maintain last known 'active' flag per (relay, sensorType) for hysteresis smoothing
+    static bool lastActive[4][4] = {{false}}; // [relay][sensorIndex]
+    int sIdx = sensorTypeToIndex(sensor_type);
+    if (sIdx < 0) sIdx = 0;
 
+    // Normalize action for robust comparison
+    char normalizedAction[16];
+    normalizeActionString(sensor->action, normalizedAction, sizeof(normalizedAction));
+
+    float h = sensor->hysteresis > 0.0f ? sensor->hysteresis : 1.0f;
     bool active = false;
 
     if (strcmp(sensor->control_mode, "min_trigger") == 0) {
-        // Active when value < min - h. Inactive when value > min + h.
         if (current_value < sensor->min_value - h) active = true;
         else if (current_value > sensor->min_value + h) active = false;
-        else active = lastActive[relay_id];
+        else active = lastActive[relay_id][sIdx];
     }
     else if (strcmp(sensor->control_mode, "max_trigger") == 0) {
-        // Active when value > max + h. Inactive when value < max - h.
         if (current_value > sensor->max_value + h) active = true;
         else if (current_value < sensor->max_value - h) active = false;
-        else active = lastActive[relay_id];
+        else active = lastActive[relay_id][sIdx];
     }
     else if (strcmp(sensor->control_mode, "range") == 0) {
-        // Active when outside [min - h, max + h]. Inactive when inside [min + h, max - h].
         if (current_value < sensor->min_value - h || current_value > sensor->max_value + h) active = true;
         else if (current_value >= sensor->min_value + h && current_value <= sensor->max_value - h) active = false;
-        else active = lastActive[relay_id];
+        else active = lastActive[relay_id][sIdx];
     }
 
-    // Update lastActive for hysteresis memory
-    lastActive[relay_id] = active;
+    lastActive[relay_id][sIdx] = active;
 
     if (!active) {
-        // No active trigger now
-        ESP_LOGD(TAG, "Sensor inactive relay=%d type=%s value=%.2f action=%s", relay_id, sensor_type, current_value, sensor->action);
-        *should_turn_on = false;
+        ESP_LOGD(TAG, "Sensor inactive relay=%d type=%s value=%.2f action=%s", relay_id, sensor_type, current_value, normalizedAction);
+        if (should_turn_on) *should_turn_on = false;
         return false;
     }
 
-    // active == true: sensor condition currently triggered. Respect actionOnTrigger.
-    bool turnOffOnTrigger = (strcmp(sensor->action, "turn_off") == 0);
-    *should_turn_on = turnOffOnTrigger ? false : true;
-    ESP_LOGD(TAG, "Sensor ACTIVE relay=%d type=%s value=%.2f action=%s shouldTurnOn=%d", relay_id, sensor_type, current_value, sensor->action, *should_turn_on);
+    bool turnOffOnTrigger = isActionTurnOff(normalizedAction);
+    if (should_turn_on) *should_turn_on = turnOffOnTrigger ? false : true;
+    ESP_LOGI(TAG, "Sensor ACTIVE relay=%d type=%s value=%.2f action=%s shouldTurnOn=%d", 
+             relay_id, sensor_type, current_value, normalizedAction, should_turn_on ? (*should_turn_on) : -1);
     return true;
 }
 
@@ -575,7 +616,7 @@ bool AutomationApiClient::checkActiveTimer(int relay_id, int current_minutes,
     char endpoint[256];
     snprintf(endpoint, sizeof(endpoint), 
              "/api/automation/timers/active?userId=%s&relayId=%d&time=%s&day=%d",
-             SITE_ID, relay_id, time_str, day_of_week);
+             USER_ID, relay_id, time_str, day_of_week);
     
     String response;
     if (!sendGetRequest(endpoint, response)) {
@@ -594,7 +635,7 @@ bool AutomationApiClient::checkSensorAPI(int relay_id, const char* sensor_type,
     char endpoint[256];
     snprintf(endpoint, sizeof(endpoint), 
              "/api/automation/sensors/check?userId=%s&relayId=%d&sensorType=%s&currentValue=%.2f",
-             SITE_ID, relay_id, sensor_type, current_value);
+             USER_ID, relay_id, sensor_type, current_value);
     
     String response;
     if (!sendGetRequest(endpoint, response)) {
