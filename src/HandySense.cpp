@@ -143,17 +143,26 @@ void setRelayState(int relayId, bool turnOn, const char *source)
   if (relayId < 0 || relayId >= 4)
     return;
 
-  // **หัวใจของการแก้ไข: ตรวจสอบสถานะปัจจุบันก่อนสั่งงานเสมอ**
-  if (RelayStatus[relayId] == (turnOn ? 1 : 0))
+  // ตรวจสอบสถานะปัจจุบันก่อนสั่งงานเสมอ
+  // อ่านสถานะฮาร์ดแวร์จากพินจริง เพื่อให้สถานะอ้างอิงเป็นจริงเสมอ
+  int hwLevel = digitalRead(relay_pin[relayId]);
+  bool hwOn = (hwLevel == HIGH);
+
+  // ถ้าสถานะฮาร์ดแวร์ตรงกับสิ่งที่ต้องการแล้ว ให้ซิงค์ RelayStatus และไม่สั่งซ้ำ
+  if (hwOn == turnOn)
   {
-    // ถ้าสถานะเหมือนเดิม ไม่ต้องทำอะไรเลยเพื่อป้องกันการกระพริบ
+    if (RelayStatus[relayId] != (turnOn ? 1 : 0)) {
+      ESP_LOGW(TAG, "Relay %d status mismatch: RelayStatus=%d but hardware=%d, correcting RelayStatus", relayId, RelayStatus[relayId], hwOn ? 1 : 0);
+      RelayStatus[relayId] = hwOn ? 1 : 0;
+    }
     return;
   }
 
   // ถ้าสถานะไม่เหมือนเดิม ให้สั่งงานและอัปเดตสถานะ
-  ESP_LOGI(TAG, "Source: [%s] -> Changing Relay %d to %s", source, relayId, turnOn ? "ON" : "OFF");
+  ESP_LOGI(TAG, "Source: [%s] -> Changing Relay %d to %s (hwBefore=%d)", source, relayId, turnOn ? "ON" : "OFF", hwOn ? 1 : 0);
 
-  digitalWrite(relay_pin[relayId], turnOn);
+  // Use explicit HIGH/LOW to avoid ambiguity
+  digitalWrite(relay_pin[relayId], turnOn ? HIGH : LOW);
   UI_updateOutputStatus(relayId, turnOn);
   bool oldState = (RelayStatus[relayId] == 1);
   RelayStatus[relayId] = turnOn ? 1 : 0;
@@ -1269,20 +1278,28 @@ void checkSensorControl(int relayId, const char *sensorType, float currentValue)
     if (shouldTurnOn)
     {
       Open_relay(relayId, "AUTO_API_SENSOR");
-  // Ensure API is informed about this automation decision
+      // Ensure API is informed about this automation decision
 #if USE_SWITCH_API_CONTROL >= 1
-  ignoreNextSync[relayId] = true;
-  updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
+      ignoreNextSync[relayId] = true;
+      updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
 #endif
     }
     else
     {
-      Close_relay(relayId, "AUTO_API_SENSOR");
-  // Ensure API is informed about this automation decision
+      // actionOnTrigger == turn_off -> attempt to close the relay if it's currently open
+      if (relayId >= 0 && relayId < 4 && RelayStatus[relayId] == 1)
+      {
+        ESP_LOGI(TAG, "Sensor requests turn_off and relay %d is OPEN -> closing relay", relayId);
+        Close_relay(relayId, "AUTO_API_SENSOR");
 #if USE_SWITCH_API_CONTROL >= 1
-  ignoreNextSync[relayId] = true;
-  updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
+        ignoreNextSync[relayId] = true;
+        updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
 #endif
+      }
+      else
+      {
+        ESP_LOGD(TAG, "Sensor requests turn_off but relay %d already closed or invalid", relayId);
+      }
     }
   }
 }
