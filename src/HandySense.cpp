@@ -1263,9 +1263,9 @@ void checkSensorControl(int relayId, const char *sensorType, float currentValue)
 
   bool shouldTurnOn = false;
   bool hasTrigger = AutomationApiClient::checkSensorTrigger(relayId, sensorType, currentValue, &shouldTurnOn);
-
   if (hasTrigger)
   {
+    ESP_LOGI(TAG, "Sensor decision relay=%d type=%s -> hasTrigger=1 shouldTurnOn=%d", relayId, sensorType, shouldTurnOn);
     if (shouldTurnOn)
     {
       Open_relay(relayId, "AUTO_API_SENSOR");

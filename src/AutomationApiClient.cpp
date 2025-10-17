@@ -101,6 +101,7 @@ bool AutomationApiClient::syncFromAPI() {
         if (local_timer_count >= 12) break;
 
         AutomationTimer& t = local_timers[local_timer_count];
+        // Use API-provided relayId as-is (API/web UI uses 0-based relay IDs)
         t.relay_id = timer["relayId"];
         t.timer_id = timer["timerId"];
         t.enabled = timer["enabled"];
@@ -126,8 +127,9 @@ bool AutomationApiClient::syncFromAPI() {
     for (JsonObject sensor : sensors) {
         if (local_sensor_count >= 16) break;
 
-        AutomationSensor& s = local_sensors[local_sensor_count];
-        s.relay_id = sensor["relayId"];
+    AutomationSensor& s = local_sensors[local_sensor_count];
+    // Use API-provided relayId as-is (API/web UI uses 0-based relay IDs)
+    s.relay_id = sensor["relayId"];
         strncpy(s.sensor_type, sensor["sensorType"].as<const char*>(), sizeof(s.sensor_type) - 1);
         s.enabled = sensor["enabled"];
         s.min_value = sensor["minValue"];
@@ -143,8 +145,14 @@ bool AutomationApiClient::syncFromAPI() {
         s.action[sizeof(s.action) - 1] = '\0';
         s.hysteresis = sensor["hysteresis"];
 
-        ESP_LOGD(TAG, "Loaded sensor [%d] relay=%d type=%s enabled=%d min=%.2f max=%.2f action=%s hysteresis=%.2f",
-                 local_sensor_count, s.relay_id, s.sensor_type, s.enabled, s.min_value, s.max_value, s.action, s.hysteresis);
+        // Log enabled sensors at INFO so it's easy to spot during runtime
+        if (s.enabled) {
+            ESP_LOGI(TAG, "Loaded ENABLED sensor [%d] apiRelay=%d storedRelay=%d type=%s min=%.2f max=%.2f action=%s hysteresis=%.2f",
+                     local_sensor_count, sensor["relayId"].as<int>(), s.relay_id, s.sensor_type, s.min_value, s.max_value, s.action, s.hysteresis);
+        } else {
+            ESP_LOGD(TAG, "Loaded sensor [%d] apiRelay=%d storedRelay=%d type=%s enabled=%d min=%.2f max=%.2f action=%s hysteresis=%.2f",
+                     local_sensor_count, sensor["relayId"].as<int>(), s.relay_id, s.sensor_type, s.enabled, s.min_value, s.max_value, s.action, s.hysteresis);
+        }
         local_sensor_count++;
     }
 
@@ -264,59 +272,46 @@ bool AutomationApiClient::checkSensorTrigger(int relay_id, const char* sensor_ty
         *should_turn_on = false;
         return false;
     }
-    
-    bool trigger = false;
-    static bool lastState[4] = {false, false, false, false};
+    // Maintain last known 'active' flag per-relay for hysteresis smoothing.
+    static bool lastActive[4] = {false, false, false, false};
     float h = sensor->hysteresis > 0.0f ? sensor->hysteresis : 1.0f;
 
+    bool active = false;
+
     if (strcmp(sensor->control_mode, "min_trigger") == 0) {
-        // เปิดเมื่อ value < min_value - hysteresis
-        if (lastState[relay_id]) {
-            // เปิดอยู่: ปิดเมื่อ value > min_value + hysteresis
-            trigger = (current_value < sensor->min_value + h);
-        } else {
-            // ปิดอยู่: เปิดเมื่อ value < min_value - hysteresis
-            trigger = (current_value < sensor->min_value - h);
-        }
+        // Active when value < min - h. Inactive when value > min + h.
+        if (current_value < sensor->min_value - h) active = true;
+        else if (current_value > sensor->min_value + h) active = false;
+        else active = lastActive[relay_id];
     }
     else if (strcmp(sensor->control_mode, "max_trigger") == 0) {
-        // เปิดเมื่อ value > max_value + hysteresis
-        if (lastState[relay_id]) {
-            // เปิดอยู่: ปิดเมื่อ value < max_value - hysteresis
-            trigger = (current_value > sensor->max_value - h);
-        } else {
-            // ปิดอยู่: เปิดเมื่อ value > max_value + h
-            trigger = (current_value > sensor->max_value + h);
-        }
+        // Active when value > max + h. Inactive when value < max - h.
+        if (current_value > sensor->max_value + h) active = true;
+        else if (current_value < sensor->max_value - h) active = false;
+        else active = lastActive[relay_id];
     }
     else if (strcmp(sensor->control_mode, "range") == 0) {
-        // เปิดเมื่อ value < min_value - h หรือ > max_value + h
-        if (lastState[relay_id]) {
-            // เปิดอยู่: ปิดเมื่อ value อยู่ในช่วง (min_value + h, max_value - h)
-            trigger = (current_value < sensor->min_value + h || current_value > sensor->max_value - h);
-        } else {
-            // ปิดอยู่: เปิดเมื่อ value < min_value - h หรือ > max_value + h
-            trigger = (current_value < sensor->min_value - h || current_value > sensor->max_value + h);
-        }
+        // Active when outside [min - h, max + h]. Inactive when inside [min + h, max - h].
+        if (current_value < sensor->min_value - h || current_value > sensor->max_value + h) active = true;
+        else if (current_value >= sensor->min_value + h && current_value <= sensor->max_value - h) active = false;
+        else active = lastActive[relay_id];
     }
-    lastState[relay_id] = trigger;
-    // Respect actionOnTrigger: when a trigger occurs we decide whether the action is to turn ON or OFF.
+
+    // Update lastActive for hysteresis memory
+    lastActive[relay_id] = active;
+
+    if (!active) {
+        // No active trigger now
+        ESP_LOGD(TAG, "Sensor inactive relay=%d type=%s value=%.2f action=%s", relay_id, sensor_type, current_value, sensor->action);
+        *should_turn_on = false;
+        return false;
+    }
+
+    // active == true: sensor condition currently triggered. Respect actionOnTrigger.
     bool turnOffOnTrigger = (strcmp(sensor->action, "turn_off") == 0);
-
-    if (trigger) {
-        // When trigger==true, produce the desired state according to actionOnTrigger
-        *should_turn_on = turnOffOnTrigger ? false : true;
-        ESP_LOGD(TAG, "Sensor TRIGGERED relay=%d type=%s value=%.2f trigger=%d action=%s shouldTurnOn=%d",
-                 relay_id, sensor_type, current_value, trigger, sensor->action, *should_turn_on);
-        // Return true to indicate an active trigger (caller should act)
-        return true;
-    }
-
-    // No active trigger right now -> do not command any change
-    *should_turn_on = false;
-    ESP_LOGD(TAG, "Sensor check (no trigger) relay=%d type=%s value=%.2f trigger=%d action=%s",
-             relay_id, sensor_type, current_value, trigger, sensor->action);
-    return false;
+    *should_turn_on = turnOffOnTrigger ? false : true;
+    ESP_LOGD(TAG, "Sensor ACTIVE relay=%d type=%s value=%.2f action=%s shouldTurnOn=%d", relay_id, sensor_type, current_value, sensor->action, *should_turn_on);
+    return true;
 }
 
 // ===================================================================
