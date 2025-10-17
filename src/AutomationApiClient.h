@@ -12,7 +12,7 @@
 // ===================================================================
 
 // Configuration
-#define AUTOMATION_API_ENABLE       0  // ปิดใช้งานระบบอัตโนมัติชั่วคราว
+#define AUTOMATION_API_ENABLE       1  // ปิดใช้งานระบบอัตโนมัติชั่วคราว
 #define AUTOMATION_SYNC_INTERVAL    10000   // 10 seconds (Sync ทุก 10 วินาที)
 #define TIMER_CHECK_INTERVAL        10000   // 10 seconds (เช็คทุก 10 วินาที - แม่นยำขึ้น!)
 #define SENSOR_CHECK_INTERVAL       10000   // 10 seconds

@@ -133,8 +133,18 @@ bool AutomationApiClient::syncFromAPI() {
         s.min_value = sensor["minValue"];
         s.max_value = sensor["maxValue"];
         strncpy(s.control_mode, sensor["controlMode"].as<const char*>(), sizeof(s.control_mode) - 1);
+        // actionOnTrigger can be 'turn_on' or 'turn_off' (default turn_on)
+        const char* actionOnTrigger = sensor["actionOnTrigger"];
+        if (actionOnTrigger) {
+            strncpy(s.action, actionOnTrigger, sizeof(s.action) - 1);
+        } else {
+            strncpy(s.action, "turn_on", sizeof(s.action) - 1);
+        }
+        s.action[sizeof(s.action) - 1] = '\0';
         s.hysteresis = sensor["hysteresis"];
 
+        ESP_LOGD(TAG, "Loaded sensor [%d] relay=%d type=%s enabled=%d min=%.2f max=%.2f action=%s hysteresis=%.2f",
+                 local_sensor_count, s.relay_id, s.sensor_type, s.enabled, s.min_value, s.max_value, s.action, s.hysteresis);
         local_sensor_count++;
     }
 
@@ -290,8 +300,23 @@ bool AutomationApiClient::checkSensorTrigger(int relay_id, const char* sensor_ty
         }
     }
     lastState[relay_id] = trigger;
-    *should_turn_on = trigger;
-    return trigger;
+    // Respect actionOnTrigger: when a trigger occurs we decide whether the action is to turn ON or OFF.
+    bool turnOffOnTrigger = (strcmp(sensor->action, "turn_off") == 0);
+
+    if (trigger) {
+        // When trigger==true, produce the desired state according to actionOnTrigger
+        *should_turn_on = turnOffOnTrigger ? false : true;
+        ESP_LOGD(TAG, "Sensor TRIGGERED relay=%d type=%s value=%.2f trigger=%d action=%s shouldTurnOn=%d",
+                 relay_id, sensor_type, current_value, trigger, sensor->action, *should_turn_on);
+        // Return true to indicate an active trigger (caller should act)
+        return true;
+    }
+
+    // No active trigger right now -> do not command any change
+    *should_turn_on = false;
+    ESP_LOGD(TAG, "Sensor check (no trigger) relay=%d type=%s value=%.2f trigger=%d action=%s",
+             relay_id, sensor_type, current_value, trigger, sensor->action);
+    return false;
 }
 
 // ===================================================================
@@ -532,7 +557,15 @@ bool AutomationApiClient::logEvent(int relay_id, const char* event_type,
     serializeJson(doc, payload);
     
     String response;
-    return sendPostRequest(ENDPOINT_AUTOMATION_LOGS, payload.c_str(), response);
+    bool success = sendPostRequest(ENDPOINT_AUTOMATION_LOGS, payload.c_str(), response);
+    if (success) {
+        ESP_LOGI(TAG, "logEvent sent: relay=%d type=%s source=%s old=%d new=%d", relay_id, event_type, event_source, old_state, new_state);
+    } else {
+        ESP_LOGW(TAG, "logEvent failed: relay=%d type=%s source=%s", relay_id, event_type, event_source);
+        ESP_LOGV(TAG, "Payload: %s", payload.c_str());
+        ESP_LOGV(TAG, "Response: %s", response.c_str());
+    }
+    return success;
 }
 
 // ===================================================================
@@ -699,6 +732,13 @@ bool AutomationApiClient::sendPostRequest(const char* endpoint, const char* payl
 
 // ตรวจสอบว่ามี automation (timer/sensor) อย่างน้อย 1 รายการหรือไม่
 bool AutomationApiClient::isAnyAutomationActive() {
-    return (AutomationApiClient::local_timer_count > 0 || AutomationApiClient::local_sensor_count > 0);
+    // Only consider automation active when there is at least one enabled timer or sensor
+    for (int i = 0; i < AutomationApiClient::local_timer_count; i++) {
+        if (AutomationApiClient::local_timers[i].enabled) return true;
+    }
+    for (int i = 0; i < AutomationApiClient::local_sensor_count; i++) {
+        if (AutomationApiClient::local_sensors[i].enabled) return true;
+    }
+    return false;
 }
 
