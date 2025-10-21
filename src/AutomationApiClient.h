@@ -1,4 +1,4 @@
-
+﻿
 #pragma once
 
 #include <stdint.h> // <-- Add this line for uint8_t
@@ -8,13 +8,13 @@
 
 // ===================================================================
 // Automation API Client for ESP32
-// Three-Way Sync: ESP32 ↔ API ↔ MQTT
+// Three-Way Sync: ESP32 â†” API â†” MQTT
 // ===================================================================
 
 // Configuration
-#define AUTOMATION_API_ENABLE       1  // ปิดใช้งานระบบอัตโนมัติชั่วคราว
-#define AUTOMATION_SYNC_INTERVAL    10000   // 10 seconds (Sync ทุก 10 วินาที)
-#define TIMER_CHECK_INTERVAL        10000   // 10 seconds (เช็คทุก 10 วินาที - แม่นยำขึ้น!)
+#define AUTOMATION_API_ENABLE       1  // à¸›à¸´à¸”à¹ƒà¸Šà¹‰à¸‡à¸²à¸™à¸£à¸°à¸šà¸šà¸­à¸±à¸•à¹‚à¸™à¸¡à¸±à¸•à¸´à¸Šà¸±à¹ˆà¸§à¸„à¸£à¸²à¸§
+#define AUTOMATION_SYNC_INTERVAL    10000   // 10 seconds (Sync à¸—à¸¸à¸ 10 à¸§à¸´à¸™à¸²à¸—à¸µ)
+#define TIMER_CHECK_INTERVAL        10000   // 10 seconds (à¹€à¸Šà¹‡à¸„à¸—à¸¸à¸ 10 à¸§à¸´à¸™à¸²à¸—à¸µ - à¹à¸¡à¹ˆà¸™à¸¢à¸³à¸‚à¸¶à¹‰à¸™!)
 #define SENSOR_CHECK_INTERVAL       10000   // 10 seconds
 
 // API Endpoints
@@ -70,7 +70,7 @@ public:
     static bool getSensors();
     static int getLocalSensorCount();
     static AutomationSensor* getLocalSensor(int relay_id, const char* sensor_type);
-    static bool checkSensorTrigger(int relay_id, const char* sensor_type, float current_value, bool* should_turn_on);
+    static bool checkSensorTrigger(int relay_id, const char* sensor_type, float current_value, bool* should_turn_on, String* action_on_trigger);
     static bool triggerRelay(
         int relay_id,
         bool turn_on,
@@ -134,4 +134,5 @@ private:
 
 #define LOG_AUTOMATION(tag, format, ...) ESP_LOGI(tag, "[AUTO] " format, ##__VA_ARGS__)
 #define LOG_AUTOMATION_ERROR(tag, format, ...) ESP_LOGE(tag, "[AUTO] " format, ##__VA_ARGS__)
+
 

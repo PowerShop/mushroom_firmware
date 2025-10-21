@@ -38,14 +38,14 @@ static bool updateSwitchStateToAPI(int relayId, int state);
 // static void syncAllRelaysToAPI();
 int check_sendData_status = 0;
 
-  // Push all relay states to Switch API (map 0-3 -> switch 1-4)
-  // for (int i = 0; i < 4; i++)
-  // {
-  //   int state = RelayStatus[i];
-  //   int switchId = RELAY_ID_TO_SWITCH_ID(i);
-  //   ESP_LOGD(TAG, "syncAllRelaysToAPI: relay %d -> switch %d state=%d", i, switchId, state);
-  //   updateSwitchStateToAPI(i, state);
-  // }
+// Push all relay states to Switch API (map 0-3 -> switch 1-4)
+// for (int i = 0; i < 4; i++)
+// {
+//   int state = RelayStatus[i];
+//   int switchId = RELAY_ID_TO_SWITCH_ID(i);
+//   ESP_LOGD(TAG, "syncAllRelaysToAPI: relay %d -> switch %d state=%d", i, switchId, state);
+//   updateSwitchStateToAPI(i, state);
+// }
 
 static const char *TAG = "HandySense";
 
@@ -151,7 +151,8 @@ void setRelayState(int relayId, bool turnOn, const char *source)
   // ถ้าสถานะฮาร์ดแวร์ตรงกับสิ่งที่ต้องการแล้ว ให้ซิงค์ RelayStatus และไม่สั่งซ้ำ
   if (hwOn == turnOn)
   {
-    if (RelayStatus[relayId] != (turnOn ? 1 : 0)) {
+    if (RelayStatus[relayId] != (turnOn ? 1 : 0))
+    {
       ESP_LOGW(TAG, "Relay %d status mismatch: RelayStatus=%d but hardware=%d, correcting RelayStatus", relayId, RelayStatus[relayId], hwOn ? 1 : 0);
       RelayStatus[relayId] = hwOn ? 1 : 0;
     }
@@ -479,7 +480,9 @@ static bool updateSwitchStateToAPI(int relayId, int state)
   ESP_LOGW(TAG, "Failed to update switch %d to API after retry", mappedSwitchId);
   return false;
 #else
-  (void)relayId; (void)state; return false;
+  (void)relayId;
+  (void)state;
+  return false;
 #endif
 }
 /* --------- Respone soilMinMax toWeb --------- */
@@ -1267,18 +1270,50 @@ void checkSensorControl(int relayId, const char *sensorType, float currentValue)
 {
   if (!AutomationApiClient::isAnyAutomationActive())
     return;
-  if (AutomationApiClient::isOverrideActive(relayId))
+
+  // Gate sensor control by timer configuration and priority
+  time_t now;
+  time(&now);
+  struct tm *timeinfo = localtime(&now);
+  int currentMinutes = timeinfo->tm_hour * 60 + timeinfo->tm_min;
+  int dayOfWeek = AutomationApiClient::getDayOfWeek(timeinfo);
+
+  bool hasActiveTimer = false;
+  for (int timerId = 0; timerId < 3; timerId++)
+  {
+    AutomationTimer *timer = AutomationApiClient::getLocalTimer(relayId, timerId);
+    if (timer && timer->enabled &&
+        AutomationApiClient::isTimerActive(relayId, timerId, currentMinutes, dayOfWeek))
+    {
+      hasActiveTimer = true;
+      break;
+    }
+  }
+
+  // Priority: when any timer window is active for this relay, skip sensor control
+  if (hasActiveTimer)
+  {
+    ESP_LOGD(TAG, "Sensor skipped: relay %d timer is active (priority timer > sensor)", relayId);
     return;
+  }
 
   bool shouldTurnOn = false;
-  bool hasTrigger = AutomationApiClient::checkSensorTrigger(relayId, sensorType, currentValue, &shouldTurnOn);
+  String actionOnTrigger = "";
+  bool hasTrigger = AutomationApiClient::checkSensorTrigger(relayId, sensorType, currentValue, &shouldTurnOn, &actionOnTrigger);
   if (hasTrigger)
   {
-    ESP_LOGI(TAG, "Sensor decision relay=%d type=%s -> hasTrigger=1 shouldTurnOn=%d", relayId, sensorType, shouldTurnOn);
-    if (shouldTurnOn)
+    ESP_LOGI(TAG, "Sensor decision relay=%d type=%s -> hasTrigger=1 action=%s", relayId, sensorType, actionOnTrigger.c_str());
+    if (actionOnTrigger == "turn_on")
     {
       Open_relay(relayId, "AUTO_API_SENSOR");
-      // Ensure API is informed about this automation decision
+#if USE_SWITCH_API_CONTROL >= 1
+      ignoreNextSync[relayId] = true;
+      updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
+#endif
+    }
+    else if (actionOnTrigger == "turn_off")
+    {
+      Close_relay(relayId, "AUTO_API_SENSOR");
 #if USE_SWITCH_API_CONTROL >= 1
       ignoreNextSync[relayId] = true;
       updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
@@ -1286,20 +1321,7 @@ void checkSensorControl(int relayId, const char *sensorType, float currentValue)
     }
     else
     {
-      // actionOnTrigger == turn_off -> attempt to close the relay if it's currently open
-      if (relayId >= 0 && relayId < 4 && RelayStatus[relayId] == 1)
-      {
-        ESP_LOGI(TAG, "Sensor requests turn_off and relay %d is OPEN -> closing relay", relayId);
-        Close_relay(relayId, "AUTO_API_SENSOR");
-#if USE_SWITCH_API_CONTROL >= 1
-        ignoreNextSync[relayId] = true;
-        updateSwitchStateToAPI(relayId, RelayStatus[relayId]);
-#endif
-      }
-      else
-      {
-        ESP_LOGD(TAG, "Sensor requests turn_off but relay %d already closed or invalid", relayId);
-      }
+      ESP_LOGD(TAG, "Sensor action unknown: %s", actionOnTrigger.c_str());
     }
   }
 }
@@ -1312,32 +1334,57 @@ void checkAndTriggerSensors()
   float currentHumidity = humidity;
   float currentLight = lux_44009;
 
+  // Determine current time for timer priority and gating
+  time_t now;
+  time(&now);
+  struct tm *timeinfo = localtime(&now);
+  int currentMinutes = timeinfo->tm_hour * 60 + timeinfo->tm_min;
+  int dayOfWeek = AutomationApiClient::getDayOfWeek(timeinfo);
+
   for (int relayId = 0; relayId < 4; relayId++)
   {
-    // Only evaluate sensor control for sensor types that are actually configured & enabled
+    bool hasActiveTimer = false;
+    for (int timerId = 0; timerId < 3; timerId++)
+    {
+      AutomationTimer *timer = AutomationApiClient::getLocalTimer(relayId, timerId);
+      if (timer && timer->enabled &&
+          AutomationApiClient::isTimerActive(relayId, timerId, currentMinutes, dayOfWeek))
+      {
+        hasActiveTimer = true;
+        break;
+      }
+    }
+    // Priority: if a timer is currently active, do not allow sensors to override
+    if (hasActiveTimer)
+    {
+      ESP_LOGD(TAG, "Relay %d: skip sensors (timer active: priority timer > sensor)", relayId);
+      continue;
+    }
+
+    // Evaluate only sensors that are configured and enabled
     AutomationSensor *sTemp = AutomationApiClient::getLocalSensor(relayId, "temperature");
-    if (currentTemp != 0 && sTemp && sTemp->enabled)
+    if (sTemp && sTemp->enabled)
     {
       ESP_LOGD(TAG, "Relay %d: temperature sensor enabled, checking...", relayId);
       checkSensorControl(relayId, "temperature", currentTemp);
     }
 
     AutomationSensor *sSoil = AutomationApiClient::getLocalSensor(relayId, "soil_moisture");
-    if (currentSoil != 0 && sSoil && sSoil->enabled)
+    if (sSoil && sSoil->enabled)
     {
       ESP_LOGD(TAG, "Relay %d: soil_moisture sensor enabled, checking...", relayId);
       checkSensorControl(relayId, "soil_moisture", currentSoil);
     }
 
     AutomationSensor *sHum = AutomationApiClient::getLocalSensor(relayId, "humidity");
-    if (currentHumidity != 0 && sHum && sHum->enabled)
+    if (sHum && sHum->enabled)
     {
       ESP_LOGD(TAG, "Relay %d: humidity sensor enabled, checking...", relayId);
       checkSensorControl(relayId, "humidity", currentHumidity);
     }
 
     AutomationSensor *sLight = AutomationApiClient::getLocalSensor(relayId, "light");
-    if (currentLight != 0 && sLight && sLight->enabled)
+    if (sLight && sLight->enabled)
     {
       ESP_LOGD(TAG, "Relay %d: light sensor enabled, checking...", relayId);
       checkSensorControl(relayId, "light", currentLight);
@@ -1386,7 +1433,7 @@ void HandySense_loop()
     ControlRelay_BysoilMinMax();
     ControlRelay_BytempMinMax();
 #endif
-  ControlRelay_Bytimmer();
+    ControlRelay_Bytimmer();
     if (wifi_ready && update_to_server)
     {
       UpdateData_To_Server();
